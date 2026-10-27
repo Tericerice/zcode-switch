@@ -25,7 +25,7 @@ export const zh = {
   "pw.exportedAllToast": "已加密导出 {count} 个账号",
 
   "prov.title": "添加账号 · 选择登录方式",
-  "prov.sub": "在弹出的窗口里自行登录（账号密码 / 扫码），<br>登录完成后自动存入账号库，<b>不影响当前正在使用的登录</b>",
+  "prov.sub": "在系统浏览器中授权或复制链接登录，<br>登录完成后自动存入账号库，<b>不影响当前正在使用的登录</b>",
   "prov.bigmodel": "BigModel（智谱开放平台）",
   "prov.zai": "z.ai（国际站）",
 
@@ -60,8 +60,6 @@ export const zh = {
   "m.killTitle": "关闭 ZCode？",
   "m.killYes": "关闭",
   "m.toastKilled": "已关闭 ZCode",
-  "m.loginWindowOpened": "登录窗口已打开",
-  "m.loginWindowDetail": "登录完成后账号会自动入库",
   "m.claimBusy": "批量领取进行中，请等待完成",
   "m.noClaimable": "该账号暂无可领取的套餐",
   "m.claimVerify": "正在为「{name}」完成安全验证…",

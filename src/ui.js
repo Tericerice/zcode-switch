@@ -299,6 +299,7 @@ export function openLoginModal(info, opts = {}) {
   let closed = false;
 
   const copyUrl = async () => {
+    if (calcRemaining() <= 0) return;
     urlInput.select();
     let ok = false;
     try {
@@ -341,6 +342,9 @@ export function openLoginModal(info, opts = {}) {
       countdownEl.textContent = t("oauth.expiresIn", { sec: rem });
     } else {
       clearInterval(timer);
+      clearTimeout(copyTimer);
+      copyText.textContent = t("oauth.copyLink");
+      copyBtn.disabled = true;
       descEl.textContent = t("oauth.expired");
       countdownEl.textContent = "";
       dotEl.className = "cap-dot err";
