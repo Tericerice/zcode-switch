@@ -25,7 +25,7 @@ export const en = {
   "pw.exportedAllToast": "Encrypted export of {count} accounts",
 
   "prov.title": "Add account · Choose sign-in method",
-  "prov.sub": "Sign in yourself in the popup (email/phone or QR code).<br>The account is saved automatically when done, <b>without touching your current login</b>",
+  "prov.sub": "Authorize in your browser or copy the link to log in.<br>The account is saved automatically when done, <b>without touching your current login</b>",
   "prov.bigmodel": "BigModel (Zhipu Open Platform)",
   "prov.zai": "z.ai (Global)",
 
@@ -60,8 +60,6 @@ export const en = {
   "m.killTitle": "Quit ZCode?",
   "m.killYes": "Quit",
   "m.toastKilled": "ZCode closed",
-  "m.loginWindowOpened": "Login window opened",
-  "m.loginWindowDetail": "The account is saved automatically once you sign in",
   "m.claimBusy": "Batch claim in progress — wait for it to finish",
   "m.noClaimable": "No claimable plan for this account",
   "m.claimVerify": "Completing security verification for \"{name}\"…",
