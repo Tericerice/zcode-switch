@@ -1117,7 +1117,7 @@ async fn pick_zcode_path(app: AppHandle) -> Result<serde_json::Value, String> {
     let picked = app
         .dialog()
         .file()
-        .add_filter(&i18n::tr("dialog.exe"), &["exe"])
+        .add_filter(i18n::tr("dialog.exe"), &["exe"])
         .blocking_pick_file();
     let Some(fp) = picked else {
         return Ok(json!({ "picked": false }));

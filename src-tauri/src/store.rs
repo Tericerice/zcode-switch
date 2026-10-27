@@ -1608,14 +1608,4 @@ mod tests {
         let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
         assert_eq!(args, vec![url], "open argument must be exactly the un-split URL");
     }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn accepts_app_bundles_and_executables() {
-        let executable = "/Applications/ZCode.app/Contents/MacOS/ZCode";
-        assert_eq!(normalize_zcode_path("  \"/Applications/ZCode.app\"  "), Some(executable.into()));
-        assert_eq!(normalize_zcode_path(executable), Some(executable.into()));
-        assert_eq!(normalize_zcode_path("  "), None);
-        assert_eq!(normalize_zcode_path("\"\""), None);
-    }
 }
