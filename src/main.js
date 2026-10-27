@@ -29,6 +29,9 @@ let claimActive = false;
 let lastAutoRound = null;
 let autoToggleBusy = false;
 let activeLoginModal = null;
+let currentLoginFlow = null;
+let inFlightLoginId = 0;
+let earlyDoneEvents = {};
 
 const NOTCH_COLORS = ["var(--notch-1)", "var(--notch-2)", "var(--notch-3)", "var(--notch-4)", "var(--notch-5)", "var(--notch-6)"];
 function notchColor(id) {
@@ -301,20 +304,45 @@ const actions = {
     openProviderModal({
       providers,
       onPick: async (id) => {
+        const reqId = ++inFlightLoginId;
+        if (activeLoginModal) {
+          activeLoginModal.close(true);
+          activeLoginModal = null;
+        }
+        if (currentLoginFlow) {
+          const oldFlow = currentLoginFlow;
+          currentLoginFlow = null;
+          invoke("oauth_cancel", { flow: oldFlow }).catch(() => {});
+        }
+        earlyDoneEvents = {};
+
         try {
-          if (activeLoginModal) {
-            activeLoginModal.close(true);
-            activeLoginModal = null;
-          }
           const flowInfo = await invoke("oauth_begin", { provider: id });
+          if (inFlightLoginId !== reqId) {
+            if (flowInfo?.flow) invoke("oauth_cancel", { flow: flowInfo.flow }).catch(() => {});
+            return;
+          }
+          const flow = flowInfo?.flow;
+          const early = flow ? earlyDoneEvents[flow] : null;
+          if (early) {
+            earlyDoneEvents = {};
+            handleOauthDone(early);
+            return;
+          }
+          currentLoginFlow = flow;
           activeLoginModal = openLoginModal(flowInfo, {
             onCancel: () => {
+              if (currentLoginFlow === flow) {
+                currentLoginFlow = null;
+              }
               activeLoginModal = null;
             },
           });
         } catch (e) {
-          if (e !== "__superseded__" && e !== "__cancelled__") {
-            toast(stripErr(e), "err");
+          if (inFlightLoginId === reqId) {
+            if (e !== "__superseded__" && e !== "__cancelled__") {
+              toast(stripErr(e), "err");
+            }
           }
         }
       },
@@ -924,24 +952,7 @@ listen("captcha://interactive", () => {
   claimWaiter.finish({ ok: false, code: "interactive" });
 });
 
-listen("oauth://done", (ev) => {
-  const p = ev.payload || {};
-  if (activeLoginModal) {
-    if (p.flow && activeLoginModal.flow !== p.flow) {
-      return;
-    }
-    if (p.ok) {
-      activeLoginModal.close(false);
-      activeLoginModal = null;
-    } else if (p.soft) {
-      activeLoginModal.setError?.(p.error);
-    } else {
-      activeLoginModal.close(false);
-      activeLoginModal = null;
-    }
-  } else if (p.flow) {
-    return;
-  }
+function handleOauthDone(p) {
   if (p.ok === false) {
     if (p.soft) {
       toast(t("m.oauthSoft", { err: p.error || t("m.unknownErr") }), "warn", t("m.oauthSoftDetail"));
@@ -956,6 +967,36 @@ listen("oauth://done", (ev) => {
   }
   toast(t("m.oauthOk", { name: p.name }), "ok", t("m.oauthOkDetail"));
   refresh().then(() => { if (!uiLocked()) { render(); enrollAccounts(); } }).catch(() => {});
+}
+
+listen("oauth://done", (ev) => {
+  const p = ev.payload || {};
+  const flow = p.flow;
+
+  if (activeLoginModal) {
+    if (flow && activeLoginModal.flow !== flow) {
+      return;
+    }
+    if (p.ok) {
+      activeLoginModal.close(false);
+      activeLoginModal = null;
+      currentLoginFlow = null;
+    } else if (p.soft) {
+      activeLoginModal.setError?.(p.error);
+    } else {
+      activeLoginModal.close(false);
+      activeLoginModal = null;
+      currentLoginFlow = null;
+    }
+    handleOauthDone(p);
+    return;
+  }
+
+  // If an oauth_begin is in flight, record as early event for matching flow:
+  if (inFlightLoginId > 0 && flow) {
+    earlyDoneEvents[flow] = p;
+    return;
+  }
 });
 
 listen("state-changed", () => {

@@ -406,7 +406,7 @@ pub fn launch_zcode(path: &str) -> Result<(), String> {
 
 pub fn open_url(url: &str) -> Result<(), String> {
     if !url.starts_with("https://") {
-        return Err("仅支持 https 链接".into());
+        return Err(crate::i18n::tr("err.url.https_only"));
     }
     if in_sandbox() {
         return Ok(());

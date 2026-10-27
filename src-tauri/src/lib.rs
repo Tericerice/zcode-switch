@@ -374,68 +374,130 @@ fn pending_oauth_guard() -> std::sync::MutexGuard<'static, Option<PendingOAuth>>
     }
 }
 
+pub(crate) fn begin_pending_flow(flow: &str, provider: &str, mid: &str) {
+    let mut pending = pending_oauth_guard();
+    *pending = Some(PendingOAuth {
+        provider: provider.to_string(),
+        state: None,
+        flow: flow.to_string(),
+        mid: mid.to_string(),
+        persisting: false,
+    });
+    flowlog::log(flow, "begin", &format!("provider={provider}"));
+}
+
+pub(crate) fn attach_flow_state(flow: &str, state: &str) -> bool {
+    let mut pending = pending_oauth_guard();
+    match pending.as_mut() {
+        Some(p) if p.flow == flow => {
+            p.state = Some(state.to_string());
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn cancel_flow(flow: Option<&str>) -> bool {
+    let mut pending = pending_oauth_guard();
+    if let Some(p) = pending.as_ref() {
+        if flow.map(|f| f == p.flow).unwrap_or(true) {
+            let flow_id = p.flow.clone();
+            *pending = None;
+            flowlog::log(&flow_id, "cancelled", "");
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn clear_flow_if_matching(flow: &str) -> bool {
+    let mut pending = pending_oauth_guard();
+    if pending.as_ref().map(|p| p.flow == flow).unwrap_or(false) {
+        *pending = None;
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn is_flow_active(flow: &str) -> bool {
+    pending_oauth_guard()
+        .as_ref()
+        .map(|p| p.flow == flow)
+        .unwrap_or(false)
+}
+
+pub(crate) fn commit_account_save<F>(flow: &str, save_fn: F) -> Result<serde_json::Value, String>
+where
+    F: FnOnce() -> Result<serde_json::Value, String>,
+{
+    let _store_lock = store_guard();
+    let mut pending = pending_oauth_guard();
+    match pending.as_mut() {
+        Some(p) if p.flow == flow => {
+            p.persisting = true;
+        }
+        _ => return Err("__superseded__".into()),
+    }
+    let res = save_fn();
+    match res {
+        Ok(v) => {
+            if pending.as_ref().map(|p| p.flow == flow).unwrap_or(false) {
+                *pending = None;
+            }
+            Ok(v)
+        }
+        Err(e) => {
+            if let Some(p) = pending.as_mut() {
+                if p.flow == flow {
+                    p.persisting = false;
+                }
+            }
+            Err(e)
+        }
+    }
+}
+
 #[tauri::command]
 async fn oauth_providers() -> Result<Vec<oauth::OAuthProvider>, String> {
     Ok(oauth::OAUTH_PROVIDERS.to_vec())
 }
 
 #[tauri::command]
-async fn oauth_begin(app: AppHandle, provider: String) -> Result<serde_json::Value, String> {
+async fn oauth_begin(app: AppHandle, provider: String, flow: Option<String>) -> Result<serde_json::Value, String> {
     if !oauth::OAUTH_PROVIDERS.iter().any(|p| p.id == provider) {
         return Err(i18n::trf("err.oauth.unknown_provider", &[("provider", &provider)]));
     }
     if let Some(w) = app.get_webview_window("login") {
         let _ = w.close();
     }
-    let flow = uuid::Uuid::new_v4().to_string();
+    let flow = flow
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let mid = uuid::Uuid::new_v4().to_string();
 
-    {
-        let mut pending = pending_oauth_guard();
-        *pending = Some(PendingOAuth {
-            provider: provider.clone(),
-            state: None,
-            flow: flow.clone(),
-            mid: mid.clone(),
-            persisting: false,
-        });
-    }
-
-    flowlog::log(&flow, "begin", &format!("provider={provider}"));
+    begin_pending_flow(&flow, &provider, &mid);
 
     let (p_init, m_init) = (provider.clone(), mid.clone());
     let init = match tauri::async_runtime::spawn_blocking(move || oauth::init_flow(&p_init, &m_init)).await {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            let mut pending = pending_oauth_guard();
-            if pending.as_ref().map(|p| p.flow == flow).unwrap_or(false) {
-                *pending = None;
-            }
+            clear_flow_if_matching(&flow);
             flowlog::log(&flow, "init-fail", "");
             return Err(e);
         }
         Err(e) => {
-            let mut pending = pending_oauth_guard();
-            if pending.as_ref().map(|p| p.flow == flow).unwrap_or(false) {
-                *pending = None;
-            }
+            clear_flow_if_matching(&flow);
             let m = i18n::trf("err.oauth.flow", &[("e", &e.to_string())]);
             flowlog::log(&flow, "init-fail", "");
             return Err(m);
         }
     };
 
-    {
-        let mut pending = pending_oauth_guard();
-        match pending.as_mut() {
-            Some(p) if p.flow == flow => {
-                p.state = Some(init.state.clone());
-            }
-            _ => {
-                flowlog::log(&flow, "poll-exit", "superseded");
-                return Err("__superseded__".into());
-            }
-        }
+    if !attach_flow_state(&flow, &init.state) {
+        flowlog::log(&flow, "poll-exit", "superseded");
+        return Err("__superseded__".into());
     }
 
     flowlog::log(&flow, "init-ok", "");
@@ -460,13 +522,7 @@ async fn oauth_begin(app: AppHandle, provider: String) -> Result<serde_json::Val
 
 #[tauri::command]
 async fn oauth_cancel(flow: Option<String>) -> Result<(), String> {
-    let mut pending = pending_oauth_guard();
-    if let Some(p) = pending.as_ref() {
-        if flow.as_deref().map(|f| f == p.flow).unwrap_or(true) {
-            flowlog::log(&p.flow, "cancelled", "");
-            *pending = None;
-        }
-    }
+    cancel_flow(flow.as_deref());
     Ok(())
 }
 
@@ -477,14 +533,20 @@ async fn oauth_manual_callback(app: AppHandle, flow: String, callback_url: Strin
         match pending.as_ref() {
             Some(p) if p.flow == flow => {
                 let Some(state) = &p.state else {
-                    return Err(i18n::tr("err.oauth.flow"));
+                    return Err(i18n::tr("err.oauth.not_ready"));
                 };
                 (p.provider.clone(), state.clone(), p.mid.clone())
             }
             _ => return Err(i18n::tr("err.oauth.expired")),
         }
     };
-    finish_oauth(&app, provider, state, flow, mid, &callback_url).await
+    let res = finish_oauth(&app, provider, state, flow, mid, &callback_url).await;
+    match res {
+        Ok(v) => Ok(v),
+        Err(e) if e == "__superseded__" => Err(i18n::tr("err.oauth.expired")),
+        Err(e) if e == "__attribution__" => Err(i18n::tr("err.oauth.bad_cb")),
+        Err(e) => Err(e),
+    }
 }
 
 #[tauri::command]
@@ -637,56 +699,46 @@ fn persist_oauth_account(
     );
     let config = oauth::assemble_config(provider, &jwt, &access_token);
 
-    let _lock = store_guard();
-    {
-        let mut pending = pending_oauth_guard();
-        match pending.as_mut() {
-            Some(p) if p.flow == flow && !p.persisting => {
-                p.persisting = true;
+    commit_account_save(flow, || {
+        let accounts = list_accounts(paths)?;
+        let hash = canonical_hash(&credentials);
+        if let Some(i) = store::find_same_login(&credentials, &hash, &accounts, &paths.home) {
+            let mut dup = accounts[i].clone();
+            dup.hash = hash.clone();
+            dup.credentials = credentials;
+            dup.config = Some(config);
+            dup.updated_at = now_ts();
+            if dup.virtual_device_mid.as_deref().is_none_or(|m| m.trim().is_empty()) {
+                dup.virtual_device_mid = Some(mid.to_string());
             }
-            _ => return Err("__superseded__".into()),
+            save_account(paths, &dup)?;
+            return Ok(json!({ "id": dup.id, "name": dup.name, "provider": provider, "duplicate": true, "flow": flow }));
         }
-    }
-    let accounts = list_accounts(paths)?;
-    let hash = canonical_hash(&credentials);
-    if let Some(i) = store::find_same_login(&credentials, &hash, &accounts, &paths.home) {
-        let mut dup = accounts[i].clone();
-        dup.hash = hash.clone();
-        dup.credentials = credentials;
-        dup.config = Some(config);
-        dup.updated_at = now_ts();
-        if dup.virtual_device_mid.as_deref().is_none_or(|m| m.trim().is_empty()) {
-            dup.virtual_device_mid = Some(mid.to_string());
-        }
-        save_account(paths, &dup)?;
-        *pending_oauth_guard() = None;
-        return Ok(json!({ "id": dup.id, "name": dup.name, "provider": provider, "duplicate": true, "flow": flow }));
-    }
-    let base = credentials
-        .get(format!("oauth:{provider}:user_info"))
-        .and_then(|v| v.as_str())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-        .and_then(|u| u.get("username").and_then(|x| x.as_str()).map(String::from))
-        .unwrap_or_else(|| match provider {
-            "zai" => "z.ai".to_string(),
-            _ => "BigModel".to_string(),
-        });
-    let name = unique_name(&accounts, &base);
-    let ts = now_ts();
-    let acc = Account {
-        id: uuid::Uuid::new_v4().to_string(),
-        name: name.clone(),
-        created_at: ts.clone(),
-        updated_at: ts,
-        hash,
-        credentials,
-        config: Some(config),
-        virtual_device_mid: Some(mid.to_string()),
-        virtual_arms_uid: Some(store::new_arms_uid()),
-    };
-    save_account(paths, &acc)?;
-    *pending_oauth_guard() = None;
-    Ok(json!({ "id": acc.id, "name": acc.name, "provider": provider, "flow": flow }))
+        let base = credentials
+            .get(format!("oauth:{provider}:user_info"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|u| u.get("username").and_then(|x| x.as_str()).map(String::from))
+            .unwrap_or_else(|| match provider {
+                "zai" => "z.ai".to_string(),
+                _ => "BigModel".to_string(),
+            });
+        let name = unique_name(&accounts, &base);
+        let ts = now_ts();
+        let acc = Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: name.clone(),
+            created_at: ts.clone(),
+            updated_at: ts,
+            hash,
+            credentials,
+            config: Some(config),
+            virtual_device_mid: Some(mid.to_string()),
+            virtual_arms_uid: Some(store::new_arms_uid()),
+        };
+        save_account(paths, &acc)?;
+        Ok(json!({ "id": acc.id, "name": acc.name, "provider": provider, "flow": flow }))
+    })
 }
 
 fn finalize_oauth_result(app: &AppHandle, flow: &str, result: Result<serde_json::Value, String>) {
@@ -713,7 +765,6 @@ fn finalize_oauth_result(app: &AppHandle, flow: &str, result: Result<serde_json:
 
 fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, cfg: PollCfg) {
     std::thread::spawn(move || {
-        let ours = || pending_oauth_guard().as_ref().map(|p| p.flow == flow).unwrap_or(false);
         let deadline = {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -722,7 +773,7 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
             std::cmp::min(cfg.expires_at_ms, now + u128::from(oauth::FLOW_TIMEOUT_MS))
         };
         loop {
-            if !ours() {
+            if !is_flow_active(&flow) {
                 flowlog::log(&flow, "poll-exit", "flow-done-or-replaced");
                 return;
             }
@@ -747,12 +798,11 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
                     return;
                 }
                 Err(e) => {
-                    if !ours() {
+                    if !clear_flow_if_matching(&flow) {
                         flowlog::log(&flow, "poll-exit", "superseded");
                         return;
                     }
                     flowlog::log(&flow, "poll-fail", "");
-                    *pending_oauth_guard() = None;
                     finalize_oauth_result(&app, &flow, Err(e));
                     return;
                 }
@@ -762,11 +812,10 @@ fn spawn_poll_loop(app: AppHandle, provider: String, flow: String, mid: String, 
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
             if now >= deadline {
-                if !ours() {
+                if !clear_flow_if_matching(&flow) {
                     return;
                 }
                 flowlog::log(&flow, "poll-timeout", "");
-                *pending_oauth_guard() = None;
                 finalize_oauth_result(&app, &flow, Err(i18n::tr("err.oauth.expired")));
                 return;
             }
@@ -1208,207 +1257,151 @@ mod oauth_flow_tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn test_pending_oauth_cancellation_and_supersede() {
+    fn test_begin_and_cancel_lifecycle() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let flow1 = "flow-test-111";
-        let flow2 = "flow-test-222";
+        let flow1 = "flow-test-lifecycle-1";
+        let flow2 = "flow-test-lifecycle-2";
 
-        // 1. Begin flow 1
-        {
-            let mut pending = pending_oauth_guard();
-            *pending = Some(PendingOAuth {
-                provider: "bigmodel".into(),
-                state: None,
-                flow: flow1.into(),
-                mid: "mid-1".into(),
-                persisting: false,
-            });
-        }
-        assert!(pending_oauth_guard().as_ref().map(|p| p.flow == flow1).unwrap_or(false));
+        // 1. Begin flow 1 via production helper
+        begin_pending_flow(flow1, "bigmodel", "mid-1");
+        assert!(is_flow_active(flow1));
 
-        // 2. Cancellation with wrong flow ID does not clear
-        {
-            let mut pending = pending_oauth_guard();
-            if let Some(p) = pending.as_ref() {
-                if p.flow == "wrong-flow" {
-                    *pending = None;
-                }
-            }
-        }
-        assert!(pending_oauth_guard().as_ref().map(|p| p.flow == flow1).unwrap_or(false));
+        // 2. Cancellation with wrong flow ID does not clear flow 1
+        assert!(!cancel_flow(Some("wrong-flow")));
+        assert!(is_flow_active(flow1));
 
-        // 3. Flow 2 supersedes flow 1
-        {
-            let mut pending = pending_oauth_guard();
-            *pending = Some(PendingOAuth {
-                provider: "zai".into(),
-                state: Some("state-2".into()),
-                flow: flow2.into(),
-                mid: "mid-2".into(),
-                persisting: false,
-            });
-        }
-        assert_eq!(pending_oauth_guard().as_ref().unwrap().flow, flow2);
+        // 3. Flow 2 supersedes flow 1 via production helper
+        begin_pending_flow(flow2, "zai", "mid-2");
+        assert!(!is_flow_active(flow1));
+        assert!(is_flow_active(flow2));
 
         // 4. Old flow 1 cancellation does not clear flow 2
-        {
-            let mut pending = pending_oauth_guard();
-            if let Some(p) = pending.as_ref() {
-                if p.flow == flow1 {
-                    *pending = None;
-                }
-            }
-        }
-        assert_eq!(pending_oauth_guard().as_ref().unwrap().flow, flow2);
+        assert!(!cancel_flow(Some(flow1)));
+        assert!(is_flow_active(flow2));
 
-        // 5. Correct cancellation clears
-        {
-            let mut pending = pending_oauth_guard();
-            if let Some(p) = pending.as_ref() {
-                if p.flow == flow2 {
-                    *pending = None;
-                }
-            }
-        }
+        // 5. Correct cancellation clears flow 2
+        assert!(cancel_flow(Some(flow2)));
+        assert!(!is_flow_active(flow2));
         assert!(pending_oauth_guard().is_none());
     }
 
     #[test]
-    fn test_atomic_claim_persisting_prevents_duplicate() {
+    fn test_superseded_flow_cannot_attach_state() {
         let _lock = TEST_LOCK.lock().unwrap();
-        let flow = "flow-atomic-test";
-        {
-            let mut pending = pending_oauth_guard();
-            *pending = Some(PendingOAuth {
-                provider: "bigmodel".into(),
-                state: Some("state-test".into()),
-                flow: flow.into(),
-                mid: "mid-test".into(),
-                persisting: false,
-            });
-        }
-
-        // Thread 1 claims
-        let claim1 = {
-            let mut pending = pending_oauth_guard();
-            match pending.as_mut() {
-                Some(p) if p.flow == flow && !p.persisting => {
-                    p.persisting = true;
-                    true
-                }
-                _ => false,
-            }
-        };
-        assert!(claim1);
-
-        // Thread 2 attempts to claim concurrently
-        let claim2 = {
-            let mut pending = pending_oauth_guard();
-            match pending.as_mut() {
-                Some(p) if p.flow == flow && !p.persisting => {
-                    p.persisting = true;
-                    true
-                }
-                _ => false,
-            }
-        };
-        // Second claim must fail!
-        assert!(!claim2);
-
-        // Reset
-        *pending_oauth_guard() = None;
-    }
-
-    #[test]
-    fn test_cancelled_flow_cannot_persist() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let flow = "flow-cancel-persist-test";
-        // User starts flow then cancels
-        {
-            let mut pending = pending_oauth_guard();
-            *pending = Some(PendingOAuth {
-                provider: "bigmodel".into(),
-                state: Some("state-test".into()),
-                flow: flow.into(),
-                mid: "mid-test".into(),
-                persisting: false,
-            });
-        }
-        // Cancelled
-        *pending_oauth_guard() = None;
-
-        // Attempting to persist after cancellation must fail
-        let claim = {
-            let mut pending = pending_oauth_guard();
-            match pending.as_mut() {
-                Some(p) if p.flow == flow && !p.persisting => {
-                    p.persisting = true;
-                    true
-                }
-                _ => false,
-            }
-        };
-        assert!(!claim);
-    }
-
-    #[test]
-    fn test_superseded_init_flow_dropped() {
-        let _lock = TEST_LOCK.lock().unwrap();
-        let flow1 = "flow-init-1";
-        let flow2 = "flow-init-2";
+        let flow1 = "flow-init-ord-1";
+        let flow2 = "flow-init-ord-2";
 
         // Flow 1 begins
-        {
-            let mut pending = pending_oauth_guard();
-            *pending = Some(PendingOAuth {
-                provider: "bigmodel".into(),
-                state: None,
-                flow: flow1.into(),
-                mid: "mid-1".into(),
-                persisting: false,
-            });
-        }
+        begin_pending_flow(flow1, "bigmodel", "mid-1");
 
-        // Before init_flow 1 returns, user triggers flow 2
-        {
-            let mut pending = pending_oauth_guard();
-            *pending = Some(PendingOAuth {
-                provider: "zai".into(),
-                state: None,
-                flow: flow2.into(),
-                mid: "mid-2".into(),
-                persisting: false,
-            });
-        }
+        // Before flow 1 attaches state, user starts flow 2
+        begin_pending_flow(flow2, "zai", "mid-2");
 
-        // When init_flow 1 returns, it checks if flow is still ours:
-        let accepted1 = {
-            let mut pending = pending_oauth_guard();
-            match pending.as_mut() {
-                Some(p) if p.flow == flow1 => {
-                    p.state = Some("state-1".into());
-                    true
-                }
-                _ => false,
-            }
+        // Flow 1 late init resolution must be rejected
+        assert!(!attach_flow_state(flow1, "state-1"));
+
+        // Flow 2 init resolution must be accepted
+        assert!(attach_flow_state(flow2, "state-2"));
+
+        // Clean up
+        cancel_flow(None);
+    }
+
+    #[test]
+    fn test_termination_paths_never_clear_new_flow() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let flow_old = "flow-term-old";
+        let flow_new = "flow-term-new";
+
+        // Old flow begins
+        begin_pending_flow(flow_old, "bigmodel", "mid-old");
+
+        // New flow begins, superseding old flow
+        begin_pending_flow(flow_new, "zai", "mid-new");
+
+        // Old poll failure/timeout path attempts to clear using production helper:
+        assert!(!clear_flow_if_matching(flow_old));
+
+        // New flow must remain active and unharmed
+        assert!(is_flow_active(flow_new));
+
+        // Matching termination clears cleanly
+        assert!(clear_flow_if_matching(flow_new));
+        assert!(!is_flow_active(flow_new));
+    }
+
+    #[test]
+    fn test_commit_save_mutual_exclusion_with_cancel() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let flow = "flow-commit-cancel";
+
+        begin_pending_flow(flow, "bigmodel", "mid-test");
+        assert!(attach_flow_state(flow, "state-test"));
+
+        // User cancels flow before persistence commit
+        assert!(cancel_flow(Some(flow)));
+
+        // commit_account_save must return Err("__superseded__") and NEVER execute closure
+        let mut executed = false;
+        let res = commit_account_save(flow, || {
+            executed = true;
+            Ok(json!({"saved": true}))
+        });
+        assert_eq!(res.unwrap_err(), "__superseded__");
+        assert!(!executed);
+    }
+
+    #[test]
+    fn test_commit_save_concurrent_poll_and_callback() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let flow = "flow-comp-test";
+
+        begin_pending_flow(flow, "bigmodel", "mid-comp");
+        assert!(attach_flow_state(flow, "state-comp"));
+
+        let flow_t1 = flow.to_string();
+        let flow_t2 = flow.to_string();
+
+        let handle1 = std::thread::spawn(move || {
+            commit_account_save(&flow_t1, || Ok(json!({"winner": 1})))
+        });
+        let handle2 = std::thread::spawn(move || {
+            commit_account_save(&flow_t2, || Ok(json!({"winner": 2})))
+        });
+
+        let res1 = handle1.join().unwrap();
+        let res2 = handle2.join().unwrap();
+
+        // Exactly one must succeed, and the other must return Err("__superseded__")
+        let (ok_count, superseded_count) = match (&res1, &res2) {
+            (Ok(_), Err(e)) if e == "__superseded__" => (1, 1),
+            (Err(e), Ok(_)) if e == "__superseded__" => (1, 1),
+            _ => (0, 0),
         };
-        // Flow 1 must be rejected!
-        assert!(!accepted1);
+        assert_eq!(ok_count, 1, "exactly one commit must succeed");
+        assert_eq!(superseded_count, 1, "the loser must receive __superseded__");
 
-        // When init_flow 2 returns, it is accepted:
-        let accepted2 = {
-            let mut pending = pending_oauth_guard();
-            match pending.as_mut() {
-                Some(p) if p.flow == flow2 => {
-                    p.state = Some("state-2".into());
-                    true
-                }
-                _ => false,
-            }
-        };
-        assert!(accepted2);
+        // The flow must now be cleared
+        assert!(!is_flow_active(flow));
+    }
 
-        // Reset
-        *pending_oauth_guard() = None;
+    #[test]
+    fn test_commit_save_failure_resets_persisting_flag() {
+        let _lock = TEST_LOCK.lock().unwrap();
+        let flow = "flow-retry-test";
+
+        begin_pending_flow(flow, "bigmodel", "mid-fail");
+        assert!(attach_flow_state(flow, "state-fail"));
+
+        // Disk save fails
+        let fail_res = commit_account_save(flow, || Err("simulated disk error".into()));
+        assert!(fail_res.is_err());
+
+        // Flow is still active and persisting flag was reset so retry works
+        assert!(is_flow_active(flow));
+
+        let retry_res = commit_account_save(flow, || Ok(json!({"saved": true})));
+        assert!(retry_res.is_ok());
+        assert!(!is_flow_active(flow));
     }
 }
