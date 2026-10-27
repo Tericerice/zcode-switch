@@ -365,7 +365,12 @@ export function openLoginModal(info, opts = {}) {
     try {
       await invoke("oauth_manual_callback", { flow: info.flow, callbackUrl: val });
     } catch (e) {
-      manualErr.textContent = stripErr(e);
+      const errStr = stripErr(e);
+      manualErr.textContent = errStr === "__superseded__"
+        ? t("oauth.expired")
+        : errStr === "__attribution__"
+        ? t("oauth.manualHint")
+        : errStr;
       manualSubmit.disabled = false;
     }
   };

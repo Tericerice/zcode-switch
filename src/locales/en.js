@@ -177,7 +177,7 @@ export const en = {
   "s.hotSwitchDesc": "Off by default: switching changes the device identity, and the client only accepts the new device code after a restart. On = replace the login while running; open sessions keep the old account, and the client may keep using the old device code until restarted (at your own risk)",
   "s.authLabel": "AUTH · Sign-in",
   "s.proxyToggle": "Proxy for the sign-in window",
-  "s.proxyToggleDesc": "The z.ai login page routes by exit IP: mainland IPs only get phone-number login; overseas exits enable email login. Browser login uses your system/browser proxy; the login proxy here applies to direct-connect requests",
+  "s.proxyToggleDesc": "Account login now uses your system browser and follows your system/browser proxy directly; this legacy setting is no longer active",
   "s.proxyPh": "http://127.0.0.1:7890 or socks5://127.0.0.1:1080",
   "s.libLabel": "LIBRARY · Accounts",
   "s.importBtn": "Import account files",
