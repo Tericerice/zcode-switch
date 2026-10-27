@@ -455,7 +455,7 @@ pub fn open_url_windows(url: &str) -> Result<(), String> {
     if (ret as usize) > 32 {
         Ok(())
     } else {
-        Err(format!("ShellExecuteW failed: {ret}"))
+        Err(crate::i18n::trf("err.url.open_failed", &[("code", &ret.to_string())]))
     }
 }
 
@@ -473,7 +473,9 @@ pub fn open_url(url: &str) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         let cmd = build_open_command(url)?;
-        let _ = detached(cmd).spawn().map_err(|e| e.to_string())?;
+        let _ = detached(cmd)
+            .spawn()
+            .map_err(|e| crate::i18n::trf("err.url.open_failed", &[("code", &e.to_string())]))?;
         Ok(())
     }
 }
@@ -1587,6 +1589,13 @@ mod tests {
         assert!(encode_wide_url("http://example.com").is_err());
         assert!(encode_wide_url("javascript:alert(1)").is_err());
         assert!(encode_wide_url("cmd /c calc").is_err());
+    }
+
+    #[test]
+    fn test_open_failed_i18n_formatting() {
+        let err_zh = crate::i18n::trf("err.url.open_failed", &[("code", "2")]);
+        assert!(err_zh.contains("2"));
+        assert!(err_zh.contains("无法打开系统浏览器"));
     }
 
     #[cfg(target_os = "macos")]
