@@ -808,7 +808,7 @@ fn run_switch_probe(paths: &Paths, target: &Account, mid: Option<String>) -> Opt
 }
 
 fn probe_config_base(paths: &Paths, target: &Account) -> Option<Value> {
-    if target.config.is_none() { return None; }
+    target.config.as_ref()?;
     if new_gen_provider_config(&paths.data_root) { target.config.clone() }
     else { read_live_config(paths).or_else(|| target.config.clone()) }
 }
@@ -1168,7 +1168,7 @@ pub fn write_live_device_mid(paths: &Paths, mid: &str) -> Result<(), String> {
 }
 
 fn adopt_virtual_device_mid(paths: &Paths, acc: &mut Account) -> Result<(), String> {
-    if acc.virtual_device_mid.as_deref().map_or(false, |m| !m.trim().is_empty()) {
+    if acc.virtual_device_mid.as_deref().is_some_and(|m| !m.trim().is_empty()) {
         return Ok(());
     }
     let live_mid: Option<String> = fs::read_to_string(paths.live_telemetry())

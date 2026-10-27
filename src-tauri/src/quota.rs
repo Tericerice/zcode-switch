@@ -786,8 +786,8 @@ fn merge_parts(parts: Vec<QuotaOverview>) -> QuotaOverview {
         used,
         remaining,
         percent_used,
-        plan_tier: pri_idx.map(|i| slots[i].tier.clone()).flatten(),
-        plan_expire: pri_idx.map(|i| slots[i].expire.clone()).flatten(),
+        plan_tier: pri_idx.and_then(|i| slots[i].tier.clone()),
+        plan_expire: pri_idx.and_then(|i| slots[i].expire.clone()),
         is_empty: slots.is_empty(),
         items,
         refreshed_at: refreshed,
@@ -1009,9 +1009,9 @@ fn normalize_quota_limit(limit_resp: &Value, sub_resp: Option<&Value>) -> QuotaO
             server_percentage: percentage,
             unit: unit_str,
             period_end: reset.as_ref().map(|r| format!("{r} 重置")),
-            kind: (kind != "").then(|| kind.to_string()),
+            kind: (!kind.is_empty()).then(|| kind.to_string()),
             window: Some(window),
-            unit_code: (unit_code != "").then(|| unit_code.to_string()),
+            unit_code: (!unit_code.is_empty()).then(|| unit_code.to_string()),
             reset,
         };
         if typ == "TIME_LIMIT" && total.is_some() {
@@ -1470,5 +1470,86 @@ fn normalize_balance(balance_data: &Value) -> QuotaOverview {
         refreshed_at: 0,
         source: String::new(),
         plans: slots,
+    }
+}
+
+#[cfg(test)]
+mod multi_plan_tests {
+    use super::*;
+    use serde_json::json;
+
+    const PAID_KEY: &str = "synthetic-coding-plan-key-for-tests";
+    const START_TOKEN: &str = "synthetic-start-plan-token-for-tests";
+
+    fn paid_credentials() -> Value {
+        json!({
+            "oauth:active_provider": "bigmodel",
+            "zcodejwttoken": START_TOKEN,
+            "account-provider:bigmodel-coding-plan:api-key": PAID_KEY
+        })
+    }
+
+    fn fetch_plans(url: &str, token: &str) -> Result<Value, String> {
+        if url == QUOTA_LIMIT_URL {
+            assert_eq!(token, PAID_KEY);
+            Ok(json!({"code": 200, "data": {"level": "lite", "limits": [
+                {"type": "TIME_LIMIT", "unit": 5, "usage": 100.0, "currentValue": 7.0, "remaining": 93.0}
+            ]}}))
+        } else if url == SUBSCRIPTION_URL {
+            assert_eq!(token, PAID_KEY);
+            Ok(json!({"code": 200, "data": []}))
+        } else {
+            assert!(url.starts_with(BILLING_BALANCE_URL));
+            assert_eq!(token, START_TOKEN);
+            Ok(json!({"code": 0, "data": {"plans": [
+                {"plan_id": "zcode-start-plan", "name": "ZCode Start Plan", "status": "active"},
+                {"plan_id": "zcode-start-plan-trust", "name": "ZCode Trust Build", "status": "active"}
+            ], "balances": [
+                {"plan_id": "zcode-start-plan", "total_units": 1000.0, "used_units": 100.0, "remaining_units": 900.0},
+                {"plan_id": "zcode-start-plan-trust", "total_units": 2000.0, "used_units": 0.0, "remaining_units": 2000.0}
+            ]}}))
+        }
+    }
+
+    #[test]
+    fn bigmodel_new_config_queries_paid_and_start_plans() {
+        let channels = pick_channels(&paid_credentials(), None, "test-secret", true);
+        assert_eq!(channels, vec![Channel::Monitor(PAID_KEY.into()), Channel::ZaiBilling(START_TOKEN.into())]);
+        let quota = query_channels_via(&channels, &fetch_plans).unwrap();
+        assert_eq!(quota.plans.len(), 3);
+        assert_eq!(quota.plans.iter().map(|p| p.tier_code.as_deref()).collect::<Vec<_>>(), vec![Some("lite"), Some("start"), Some("start")]);
+        assert_eq!(quota.plans.iter().map(|p| p.remaining).collect::<Vec<_>>(), vec![Some(93.0), Some(900.0), Some(2000.0)]);
+        assert_eq!(quota.plan_tier.as_deref(), Some("Lite"));
+        assert_eq!(quota.total, Some(100.0));
+    }
+
+    #[test]
+    fn start_only_account_does_not_gain_a_paid_plan() {
+        let credentials = json!({"oauth:active_provider": "bigmodel", "zcodejwttoken": START_TOKEN});
+        let channels = pick_channels(&credentials, None, "test-secret", true);
+        assert_eq!(channels, vec![Channel::ZaiBilling(START_TOKEN.into())]);
+        let quota = query_channels_via(&channels, &fetch_plans).unwrap();
+        assert_eq!(quota.plans.len(), 2);
+        assert!(quota.plans.iter().all(|p| p.tier_code.as_deref() == Some("start")));
+        assert!(pick_channels(&json!({}), None, "test-secret", true).is_empty());
+    }
+
+    #[test]
+    fn billing_failure_keeps_paid_quota() {
+        let channels = pick_channels(&paid_credentials(), None, "test-secret", true);
+        let quota = query_channels_via(&channels, &|url, token| {
+            if url.starts_with(BILLING_BALANCE_URL) { Err("billing unavailable".into()) }
+            else { fetch_plans(url, token) }
+        }).unwrap();
+        assert_eq!(quota.plans.len(), 1);
+        assert_eq!(quota.plan_tier.as_deref(), Some("Lite"));
+    }
+
+    #[test]
+    fn billing_token_falls_back_when_jwt_is_unusable() {
+        let config = json!({"provider": {"builtin:start-plan": {"enabled": true, "options": {"apiKey": START_TOKEN}}}});
+        for credentials in [json!({}), json!({"zcodejwttoken": ""}), json!({"zcodejwttoken": "enc:v1:invalid"})] {
+            assert_eq!(zai_billing_token(&credentials, Some(&config), "test-secret"), Some(START_TOKEN.into()));
+        }
     }
 }

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { esc, toast, openPwModal, openConfirmModal, openProviderModal, installDelegation, dismissSplash } from "./ui.js";
+import { esc, toast, openPwModal, openConfirmModal, openProviderModal, openLoginModal, installDelegation, dismissSplash } from "./ui.js";
 import { ic } from "./icons.js";
 import { init, t, has, lang, localeTag, stripErr } from "./i18n.js";
 
@@ -28,6 +28,7 @@ let autoAbortRequested = false;
 let claimActive = false;
 let lastAutoRound = null;
 let autoToggleBusy = false;
+let activeLoginModal = null;
 
 const NOTCH_COLORS = ["var(--notch-1)", "var(--notch-2)", "var(--notch-3)", "var(--notch-4)", "var(--notch-5)", "var(--notch-6)"];
 function notchColor(id) {
@@ -301,10 +302,20 @@ const actions = {
       providers,
       onPick: async (id) => {
         try {
-          await invoke("oauth_begin", { provider: id });
-          toast(t("m.loginWindowOpened"), "ok", t("m.loginWindowDetail"));
+          if (activeLoginModal) {
+            activeLoginModal.close(true);
+            activeLoginModal = null;
+          }
+          const flowInfo = await invoke("oauth_begin", { provider: id });
+          activeLoginModal = openLoginModal(flowInfo, {
+            onCancel: () => {
+              activeLoginModal = null;
+            },
+          });
         } catch (e) {
-          toast(stripErr(e), "err");
+          if (e !== "__superseded__" && e !== "__cancelled__") {
+            toast(stripErr(e), "err");
+          }
         }
       },
     });
@@ -915,6 +926,22 @@ listen("captcha://interactive", () => {
 
 listen("oauth://done", (ev) => {
   const p = ev.payload || {};
+  if (activeLoginModal) {
+    if (p.flow && activeLoginModal.flow !== p.flow) {
+      return;
+    }
+    if (p.ok) {
+      activeLoginModal.close(false);
+      activeLoginModal = null;
+    } else if (p.soft) {
+      activeLoginModal.setError?.(p.error);
+    } else {
+      activeLoginModal.close(false);
+      activeLoginModal = null;
+    }
+  } else if (p.flow) {
+    return;
+  }
   if (p.ok === false) {
     if (p.soft) {
       toast(t("m.oauthSoft", { err: p.error || t("m.unknownErr") }), "warn", t("m.oauthSoftDetail"));
